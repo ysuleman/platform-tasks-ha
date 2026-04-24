@@ -1,0 +1,25 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Platform Tasks",
+        "description": "Connect Home Assistant to your Platform tasks service. The token must be a personal access token (pat_*) minted at /api/auth/api-tokens on the gateway.",
+        "data": {
+          "base_url": "Gateway URL",
+          "token": "Personal access token"
+        },
+        "data_description": {
+          "base_url": "e.g. https://dash.quadjourney.com or http://192.168.1.42:8100",
+          "token": "Starts with pat_"
+        }
+      }
+    },
+    "error": {
+      "auth_failed": "Could not authenticate against the gateway. Check the URL and token.",
+      "bad_token_format": "Token must start with pat_."
+    },
+    "abort": {
+      "already_configured": "This gateway + user is already configured."
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "domain": "platform_tasks",
+  "name": "Platform Tasks",
+  "version": "0.1.0",
+  "config_flow": true,
+  "documentation": "https://gitea.quadjourney.com/yusiboyz/platform/src/branch/master/integrations/home-assistant",
+  "issue_tracker": "https://gitea.quadjourney.com/yusiboyz/platform/issues",
+  "iot_class": "local_polling",
+  "codeowners": ["@yusiboyz"],
+  "requirements": [],
+  "dependencies": []
+}
