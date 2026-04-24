@@ -139,6 +139,8 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
         Includes any open task with a due date inside the next UPCOMING_WINDOW_DAYS,
         plus all overdue tasks. Sorted by due-soonest first.
         """
+        from homeassistant.util import slugify
+
         project_meta = {p["id"]: p for p in projects}
         now = datetime.now(timezone.utc)
         today = now.date()
@@ -162,6 +164,8 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
             days_until = (due_date - today).days
             project = project_meta.get(t.get("projectId"), {})
+            project_name = project.get("name") or t.get("_projectName") or ""
+            project_slug = slugify(project_name or (t.get("projectId") or ""))
             out.append({
                 "id": t.get("id"),
                 "title": t.get("title", ""),
@@ -172,8 +176,9 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 "is_today": days_until == 0,
                 "is_all_day": bool(t.get("isAllDay", True)),
                 "project_id": t.get("projectId"),
-                "project_name": project.get("name") or t.get("_projectName") or "",
+                "project_name": project_name,
                 "project_color": project.get("color") or t.get("color") or "",
+                "project_entity_id": f"todo.platform_{project_slug}" if project_slug else "",
                 "is_shared_project": bool(t.get("isSharedProject", False)),
             })
 
