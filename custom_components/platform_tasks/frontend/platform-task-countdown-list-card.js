@@ -16,11 +16,15 @@ class PlatformTaskCountdownListCard extends HTMLElement {
   setConfig(config) {
     this._config = {
       entity: 'sensor.platform_tasks_upcoming',
-      max_items: 25,
+      max_items: 200,
       show_overdue: true,
       compact: false,
+      default_filter: 'next7', // 'today' | 'tomorrow' | 'next7' | 'all'
       ...config,
     };
+    if (!this._filter) {
+      this._filter = this._config.default_filter || 'next7';
+    }
   }
 
   set hass(hass) {
@@ -53,35 +57,85 @@ class PlatformTaskCountdownListCard extends HTMLElement {
     if (!this._config.show_overdue) {
       tasks = tasks.filter((t) => !t.is_overdue);
     }
-    tasks = tasks.slice(0, this._config.max_items);
 
-    if (tasks.length === 0) {
+    const counts = this._counts(tasks);
+    const filtered = this._applyFilter(tasks, this._filter).slice(0, this._config.max_items);
+
+    const pillsHtml = this._pillsHtml(counts);
+    const overdue = counts.overdue;
+
+    if (filtered.length === 0) {
       this._root.innerHTML = `
         <div class="header">
           <div class="title">Up next</div>
-          <div class="meta">all caught up</div>
+          <div class="meta">${overdue > 0 ? `<span class="badge overdue">${overdue} overdue</span>` : '<span class="count">0</span>'}</div>
         </div>
-        <div class="empty">No upcoming tasks 🎉</div>
+        ${pillsHtml}
+        <div class="empty">No tasks in this view 🎉</div>
       `;
       return;
     }
 
-    const overdue = sensor.attributes.overdue_count || 0;
-    const today = sensor.attributes.today_count || 0;
-
-    const rowsHtml = tasks.map((t) => this._row(t)).join('');
+    const rowsHtml = filtered.map((t) => this._row(t)).join('');
 
     this._root.innerHTML = `
       <div class="header">
         <div class="title">Up next</div>
         <div class="meta">
           ${overdue > 0 ? `<span class="badge overdue">${overdue} overdue</span>` : ''}
-          ${today > 0 ? `<span class="badge today">${today} today</span>` : ''}
-          <span class="count">${tasks.length}</span>
+          <span class="count">${filtered.length}</span>
         </div>
       </div>
+      ${pillsHtml}
       <div class="list ${this._config.compact ? 'compact' : ''}">
         ${rowsHtml}
+      </div>
+    `;
+  }
+
+  _counts(tasks) {
+    let today = 0, tomorrow = 0, next7 = 0, overdue = 0;
+    for (const t of tasks) {
+      if (t.is_overdue) overdue++;
+      if (t.is_today || t.is_overdue) today++;
+      if (t.days_until === 1) tomorrow++;
+      if (t.is_overdue || t.days_until <= 7) next7++;
+    }
+    return { today, tomorrow, next7, all: tasks.length, overdue };
+  }
+
+  _applyFilter(tasks, key) {
+    switch (key) {
+      case 'today':
+        return tasks.filter((t) => t.is_overdue || t.is_today);
+      case 'tomorrow':
+        return tasks.filter((t) => !t.is_overdue && t.days_until === 1);
+      case 'next7':
+        return tasks.filter((t) => t.is_overdue || t.days_until <= 7);
+      case 'all':
+      default:
+        return tasks;
+    }
+  }
+
+  _pillsHtml(counts) {
+    const pills = [
+      { key: 'today',    label: 'Today',    n: counts.today },
+      { key: 'tomorrow', label: 'Tomorrow', n: counts.tomorrow },
+      { key: 'next7',    label: '7 days',   n: counts.next7 },
+      { key: 'all',      label: 'All',      n: counts.all },
+    ];
+    return `
+      <div class="pills" role="tablist">
+        ${pills.map((p) => `
+          <button class="pill ${this._filter === p.key ? 'active' : ''}"
+                  data-filter="${p.key}"
+                  role="tab"
+                  aria-selected="${this._filter === p.key}">
+            <span class="pill-label">${p.label}</span>
+            <span class="pill-count">${p.n}</span>
+          </button>
+        `).join('')}
       </div>
     `;
   }
@@ -198,6 +252,15 @@ class PlatformTaskCountdownListCard extends HTMLElement {
   }
 
   async _onClick(e) {
+    const pill = e.target.closest('.pill');
+    if (pill) {
+      const next = pill.dataset.filter;
+      if (next && next !== this._filter) {
+        this._filter = next;
+        this._render();
+      }
+      return;
+    }
     const row = e.target.closest('.row');
     if (!row) return;
     const isCheck = !!e.target.closest('.check');
@@ -284,6 +347,43 @@ class PlatformTaskCountdownListCard extends HTMLElement {
       .badge.overdue { background: rgba(220,38,38,0.14); color: #dc2626; }
       .badge.today   { background: rgba(180,83,9,0.16); color: #b45309; }
       .count { font-variant-numeric: tabular-nums; opacity: 0.55; font-weight: 600; }
+
+      .pills {
+        display: flex;
+        gap: 6px;
+        padding: 0 14px 12px;
+        flex-wrap: wrap;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: var(--card-background-color, rgba(0,0,0,0.04));
+        color: var(--secondary-text-color);
+        border: 1px solid var(--divider-color, rgba(0,0,0,0.08));
+        border-radius: 999px;
+        padding: 5px 12px;
+        font-size: 12.5px;
+        font-weight: 600;
+        cursor: pointer;
+        line-height: 1;
+        transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+      }
+      .pill:hover { background: rgba(5,150,105,0.10); color: var(--primary-text-color); }
+      .pill.active {
+        background: #059669;
+        color: #fff;
+        border-color: #059669;
+      }
+      .pill .pill-count {
+        background: rgba(0,0,0,0.10);
+        color: inherit;
+        padding: 1px 7px;
+        border-radius: 999px;
+        font-size: 10.5px;
+        font-variant-numeric: tabular-nums;
+      }
+      .pill.active .pill-count { background: rgba(255,255,255,0.22); }
 
       .list {
         display: flex;

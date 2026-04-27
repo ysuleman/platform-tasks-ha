@@ -144,9 +144,11 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
         project_meta = {p["id"]: p for p in projects}
         now = datetime.now(timezone.utc)
         today = now.date()
-        cutoff = today + timedelta(days=UPCOMING_WINDOW_DAYS)
         out: list[dict[str, Any]] = []
 
+        # Include every open task with a due date, regardless of how far
+        # out — the card filters client-side via Today / Tomorrow / 7d / All
+        # pills. Overdue tasks always come through.
         for t in tasks:
             due_iso = t.get("dueDate") or t.get("startDate")
             if not due_iso:
@@ -159,8 +161,6 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 due_dt = due_dt.replace(tzinfo=timezone.utc)
 
             due_date = due_dt.astimezone().date()
-            if due_date > cutoff:
-                continue
 
             days_until = (due_date - today).days
             project = project_meta.get(t.get("projectId"), {})

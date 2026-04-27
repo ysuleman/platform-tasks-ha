@@ -20,7 +20,7 @@ PLATFORMS: list[Platform] = [Platform.TODO, Platform.SENSOR]
 # Path the integration uses to expose its bundled frontend assets.
 # Bumped per release so browser caches don't serve stale JS after a
 # HACS update — querystring change forces a re-fetch.
-FRONTEND_VERSION = "0.2.0"
+FRONTEND_VERSION = "0.3.0"
 FRONTEND_URL = f"/platform_tasks_static/platform-task-countdown-list-card.js?v={FRONTEND_VERSION}"
 FRONTEND_FS_PATH = os.path.join(os.path.dirname(__file__), "frontend")
 
