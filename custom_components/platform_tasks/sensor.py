@@ -40,10 +40,22 @@ class UpcomingTasksSensor(CoordinatorEntity[PlatformTasksCoordinator], SensorEnt
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        upcoming = self.coordinator.data.upcoming
+        data = self.coordinator.data
+        upcoming = data.upcoming
+        # Slim user + project payloads so the sensor stays under HA's
+        # state-machine size budget (the per-task list is already the
+        # heaviest field by far).
         return {
             "tasks": upcoming,
             "overdue_count": sum(1 for t in upcoming if t["is_overdue"]),
             "today_count": sum(1 for t in upcoming if t["is_today"]),
             "window_days": UPCOMING_WINDOW_DAYS,
+            "projects": [
+                {"id": p["id"], "name": p.get("name") or "", "color": p.get("color") or ""}
+                for p in data.projects
+            ],
+            "users": [
+                {"id": u["id"], "username": u.get("username") or "", "displayName": u.get("displayName") or u.get("username") or ""}
+                for u in data.users
+            ],
         }

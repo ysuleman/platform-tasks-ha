@@ -17,6 +17,10 @@ PATH_SMART_NEXT7 = "/api/tasks/smart/next7"
 PATH_TASKS = "/api/tasks/tasks"  # POST = create
 PATH_TASK = "/api/tasks/tasks/{id}"  # PATCH / DELETE
 PATH_TASK_COMPLETE = "/api/tasks/tasks/{id}/complete"
+PATH_USERS = "/api/tasks/users"
 
 # Auth check during config_flow
 PATH_AUTH_ME = "/api/auth/me"
+
+# Smart-add service name (registered globally on the platform_tasks domain).
+SERVICE_SMART_ADD = "smart_add"

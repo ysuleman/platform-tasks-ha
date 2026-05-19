@@ -1,0 +1,37 @@
+# Services exposed by the platform_tasks integration. Surfaced in the HA
+# Developer Tools → Actions list and reachable from automations / scripts /
+# the custom countdown-list card.
+
+smart_add:
+  name: Smart add task
+  description: >-
+    Create a task from a single natural-language string. Supports the
+    web's chip syntax (`~Project @user #tag !1-4`) plus heuristics for
+    trailing project names ("Milk to Costco") and trailing known
+    usernames ("Pickup Hafsa 2pm today Madiha").
+  fields:
+    text:
+      name: Text
+      description: >-
+        Raw input. Example: "Pickup Hafsa 2pm today ~Family @madiha #errand !2"
+        or "Milk to Costco" or "Pay rent on the 1st".
+      required: true
+      example: "Milk to Costco"
+      selector:
+        text:
+    default_project_id:
+      name: Default project id
+      description: >-
+        Fallback project when the input doesn't name one. Without this,
+        unscoped tasks land in your platform personal list.
+      example: "00000000-0000-0000-0000-000000000000"
+      selector:
+        text:
+    entry_id:
+      name: Config entry id
+      description: >-
+        Only needed if you have multiple Platform Tasks accounts
+        configured. Defaults to the only configured account.
+      example: "01HZ..."
+      selector:
+        text:

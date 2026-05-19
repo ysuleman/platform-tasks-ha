@@ -23,8 +23,10 @@ from .const import (
     PATH_TASK,
     PATH_TASK_COMPLETE,
     PATH_TASKS,
+    PATH_USERS,
     UPCOMING_WINDOW_DAYS,
 )
+from .parser import parse_quick_add
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +38,7 @@ class CoordinatorData:
     projects: list[dict[str, Any]] = field(default_factory=list)
     tasks_by_project: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     upcoming: list[dict[str, Any]] = field(default_factory=list)
+    users: list[dict[str, Any]] = field(default_factory=list)
 
 
 class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
@@ -100,10 +103,14 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     async def _async_update_data(self) -> CoordinatorData:
         import asyncio
+        # Users endpoint is small + cheap and lets smart_add resolve
+        # `@username` chips and trailing-name assignees. We tolerate a
+        # failure on it — older platform builds may not expose it yet.
         try:
-            projects_resp, all_resp = await asyncio.gather(
+            projects_resp, all_resp, users_resp = await asyncio.gather(
                 self._get(PATH_PROJECTS),
                 self._get(PATH_SMART_ALL),
+                self._get_or_empty(PATH_USERS),
             )
         except aiohttp.ClientResponseError as err:
             raise UpdateFailed(f"HTTP {err.status} from platform: {err.message}") from err
@@ -112,6 +119,7 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         projects = projects_resp.get("projects", []) if isinstance(projects_resp, dict) else []
         all_tasks = all_resp.get("tasks", []) if isinstance(all_resp, dict) else []
+        users = users_resp.get("users", []) if isinstance(users_resp, dict) else []
 
         # Filter out virtual recurring occurrences for the todo entity (v1
         # decision — they don't have stable ids round-trippable to the API).
@@ -131,7 +139,20 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
             projects=projects,
             tasks_by_project=tasks_by_project,
             upcoming=upcoming,
+            users=users,
         )
+
+    async def _get_or_empty(self, path: str) -> dict[str, Any]:
+        """Like `_get` but degrades to `{}` on 404 — lets the integration
+        keep working against platform builds that haven't shipped a given
+        endpoint yet (e.g. `/api/tasks/users` on pre-v0.4.0 deployments)."""
+        try:
+            return await self._get(path)
+        except aiohttp.ClientResponseError as err:
+            if err.status == 404:
+                _LOGGER.debug("Optional endpoint %s returned 404 — skipping.", path)
+                return {}
+            raise
 
     @staticmethod
     def _compute_upcoming(tasks: list[dict[str, Any]], projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -143,7 +164,8 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
         from homeassistant.util import slugify
 
         project_meta = {p["id"]: p for p in projects}
-        today = dt_util.now().date()
+        now = datetime.now(timezone.utc)
+        today = now.date()
         out: list[dict[str, Any]] = []
 
         # Include every open task with a due date, regardless of how far
@@ -180,9 +202,20 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 "project_color": project.get("color") or t.get("color") or "",
                 "project_entity_id": f"todo.platform_{project_slug}" if project_slug else "",
                 "is_shared_project": bool(t.get("isSharedProject", False)),
+                # Hidden helper for a stable timezone-correct chronological
+                # sort below. Stripped before return so the sensor payload
+                # stays clean.
+                "_sort_ts": due_dt.astimezone(timezone.utc).timestamp(),
+                # All-day tasks share a date with timed ones; keep all-day
+                # AFTER timed entries on the same day so "8am gym" lands
+                # before "(all-day) pay bills". A 1 sorts after 0.
+                "_sort_grouped": (due_date.isoformat(), 1 if t.get("isAllDay", True) else 0),
             })
 
-        out.sort(key=lambda x: (x["due_date"], x["title"].lower()))
+        out.sort(key=lambda x: (x["_sort_grouped"], x["_sort_ts"], x["title"].lower()))
+        for row in out:
+            row.pop("_sort_ts", None)
+            row.pop("_sort_grouped", None)
         return out
 
     # ── Mutations called by the todo entity ──────────────────────────
@@ -207,3 +240,45 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     async def delete_task(self, task_id: str) -> None:
         await self._delete(PATH_TASK.format(id=task_id))
+
+    async def smart_add(self, text: str, default_project_id: str | None = None) -> dict[str, Any]:
+        """Parse a natural-language task input and POST it as a new task.
+
+        Returns the parsed payload alongside the created task. Raises a
+        ``ValueError`` if `text` parses to an empty title — the caller
+        should surface that to the user rather than silently creating
+        an "(no title)" task. HTTP errors bubble up as
+        ``aiohttp.ClientResponseError``.
+        """
+        if not text or not text.strip():
+            raise ValueError("Empty input")
+        snapshot = self.data
+        projects = snapshot.projects if snapshot else []
+        users = snapshot.users if snapshot else []
+        parsed = parse_quick_add(
+            text,
+            projects=projects,
+            users=users,
+            default_project_id=default_project_id,
+        )
+        if not parsed.title:
+            raise ValueError("Parsed title is empty — refine your input.")
+        payload = parsed.to_payload()
+        _LOGGER.info("smart_add: raw=%r → payload=%s", text, payload)
+        task = await self._post(PATH_TASKS, payload)
+        await self.async_request_refresh()
+        return {
+            "task": task,
+            "parsed": {
+                "title": parsed.title,
+                "due_at": parsed.due_at.isoformat() if parsed.due_at else None,
+                "is_all_day": parsed.is_all_day,
+                "priority": parsed.priority,
+                "tags": parsed.tags,
+                "project_id": parsed.project_id,
+                "project_hint": parsed.project_hint,
+                "assignee_user_id": parsed.assignee_user_id,
+                "assignee_username": parsed.assignee_username,
+                "repeat_flag": parsed.repeat_flag,
+            },
+        }

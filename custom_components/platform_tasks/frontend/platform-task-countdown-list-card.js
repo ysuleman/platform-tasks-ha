@@ -10,6 +10,18 @@
  *   max_items: 25                                 # default
  *   show_overdue: true                            # default
  *   compact: false                                # tighter row height
+ *   smart_add: true                               # show the smart-add input
+ *   default_project_id: ''                        # fallback project for smart_add
+ *
+ * Smart-add syntax (matches the web's QuickAddBar):
+ *   ~Project    ~Multi Word    @username    #tag    !1-4 (priority)
+ *   today | tonight | tomorrow | <weekday> | next <weekday> | MM/DD
+ *   at 2pm | 2:30pm | 14:30 | in 30 minutes | in 2 hours
+ *   daily | weekly | monthly | yearly | every <weekday>
+ *
+ * Heuristics on top of the web parser:
+ *   "Milk to Costco"                  → project hint "Costco"
+ *   "Pickup Hafsa 2pm today Madiha"   → assignee "Madiha"
  */
 
 class PlatformTaskCountdownListCard extends HTMLElement {
@@ -20,11 +32,16 @@ class PlatformTaskCountdownListCard extends HTMLElement {
       show_overdue: true,
       compact: false,
       default_filter: 'next7', // 'today' | 'tomorrow' | 'next7' | 'all'
+      smart_add: true,
+      default_project_id: '',
       ...config,
     };
     if (!this._filter) {
       this._filter = this._config.default_filter || 'next7';
     }
+    if (this._addValue === undefined) this._addValue = '';
+    if (this._addBusy === undefined) this._addBusy = false;
+    if (this._addError === undefined) this._addError = '';
   }
 
   set hass(hass) {
@@ -46,6 +63,8 @@ class PlatformTaskCountdownListCard extends HTMLElement {
       this.shadowRoot.innerHTML = `<style>${this._css()}</style><ha-card class="root"></ha-card>`;
       this._root = this.shadowRoot.querySelector('.root');
       this._root.addEventListener('click', (e) => this._onClick(e));
+      this._root.addEventListener('keydown', (e) => this._onKeydown(e));
+      this._root.addEventListener('input', (e) => this._onInput(e));
     }
 
     if (!sensor) {
@@ -57,12 +76,15 @@ class PlatformTaskCountdownListCard extends HTMLElement {
     if (!this._config.show_overdue) {
       tasks = tasks.filter((t) => !t.is_overdue);
     }
+    this._projects = sensor.attributes.projects || [];
+    this._users = sensor.attributes.users || [];
 
     const counts = this._counts(tasks);
     const filtered = this._applyFilter(tasks, this._filter).slice(0, this._config.max_items);
 
     const pillsHtml = this._pillsHtml(counts);
     const overdue = counts.overdue;
+    const addBarHtml = this._addBarHtml();
 
     if (filtered.length === 0) {
       this._root.innerHTML = `
@@ -70,9 +92,11 @@ class PlatformTaskCountdownListCard extends HTMLElement {
           <div class="title">Up next</div>
           <div class="meta">${overdue > 0 ? `<span class="badge overdue">${overdue} overdue</span>` : '<span class="count">0</span>'}</div>
         </div>
+        ${addBarHtml}
         ${pillsHtml}
         <div class="empty">No tasks in this view 🎉</div>
       `;
+      this._restoreInputFocus();
       return;
     }
 
@@ -86,11 +110,26 @@ class PlatformTaskCountdownListCard extends HTMLElement {
           <span class="count">${filtered.length}</span>
         </div>
       </div>
+      ${addBarHtml}
       ${pillsHtml}
       <div class="list ${this._config.compact ? 'compact' : ''}">
         ${rowsHtml}
       </div>
     `;
+    this._restoreInputFocus();
+  }
+
+  _restoreInputFocus() {
+    // Re-render destroys the input element; if the user was typing into it
+    // we put their cursor back where they left it. Skip the focus if the
+    // user was interacting elsewhere — e.g. mid-row hover.
+    if (!this._addHadFocus) return;
+    const el = this.shadowRoot.querySelector('.add-input');
+    if (!el) return;
+    el.value = this._addValue;
+    el.focus();
+    const len = this._addValue.length;
+    try { el.setSelectionRange(this._addCursor ?? len, this._addCursor ?? len); } catch {}
   }
 
   _counts(tasks) {
@@ -116,6 +155,257 @@ class PlatformTaskCountdownListCard extends HTMLElement {
       default:
         return tasks;
     }
+  }
+
+  _addBarHtml() {
+    if (!this._config.smart_add) return '';
+    const value = this._addValue || '';
+    const preview = value.trim() ? this._previewParse(value) : null;
+    const chipsHtml = preview ? this._previewChipsHtml(preview) : '';
+    const errorHtml = this._addError
+      ? `<div class="add-error">${this._esc(this._addError)}</div>`
+      : '';
+    const busy = this._addBusy ? 'busy' : '';
+    return `
+      <div class="add-bar ${busy}">
+        <div class="add-row">
+          <input
+            class="add-input"
+            type="text"
+            placeholder="Smart add: Milk to Costco · Pickup Hafsa 2pm today Madiha · Gym every monday !2"
+            ${this._addBusy ? 'disabled' : ''}
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+          />
+          <button class="add-btn" data-add-submit ${this._addBusy ? 'disabled' : ''} title="Add task (Enter)">
+            ${this._addBusy ? '…' : 'Add'}
+          </button>
+        </div>
+        ${chipsHtml}
+        ${errorHtml}
+      </div>
+    `;
+  }
+
+  _previewChipsHtml(p) {
+    const chips = [];
+    if (p.projectName) chips.push(`<span class="pchip pchip-project">~${this._esc(p.projectName)}</span>`);
+    else if (p.projectHint) chips.push(`<span class="pchip pchip-project unresolved" title="No project matched">~${this._esc(p.projectHint)}?</span>`);
+    if (p.assigneeDisplay) chips.push(`<span class="pchip pchip-user">@${this._esc(p.assigneeDisplay)}</span>`);
+    else if (p.assigneeHint) chips.push(`<span class="pchip pchip-user unresolved" title="No user matched">@${this._esc(p.assigneeHint)}?</span>`);
+    if (p.due) chips.push(`<span class="pchip pchip-date">${this._esc(p.due)}</span>`);
+    if (p.repeat) chips.push(`<span class="pchip pchip-rep">${this._esc(p.repeat)}</span>`);
+    if (p.priority) chips.push(`<span class="pchip pchip-pri">!${p.priority}</span>`);
+    for (const t of p.tags) chips.push(`<span class="pchip pchip-tag">#${this._esc(t)}</span>`);
+    if (!chips.length) return '';
+    return `
+      <div class="add-preview">
+        <span class="add-preview-title">${this._esc(p.title || '(no title)')}</span>
+        <span class="add-preview-chips">${chips.join('')}</span>
+      </div>
+    `;
+  }
+
+  // ── Smart-add parser ──────────────────────────────────────────────
+  // Mirrors `services/.../platform_tasks/parser.py` for live previews.
+  // The Python parser is the source of truth at submission time — this
+  // JS pass exists so the user sees their chips resolve as they type.
+  _previewParse(raw) {
+    const projects = this._projects || [];
+    const users = this._users || [];
+    const out = {
+      title: '',
+      priority: 0,
+      tags: [],
+      projectHint: null,
+      projectId: null,
+      projectName: null,
+      assigneeHint: null,
+      assigneeDisplay: null,
+      due: null,
+      repeat: null,
+    };
+    let work = raw.trim();
+    if (!work) return out;
+
+    // Priority
+    const priM = work.match(/(?:^|\s)!([1-4])(?=\s|$)/);
+    if (priM) { out.priority = parseInt(priM[1], 10); work = work.replace(priM[0], ' '); }
+
+    // Tags
+    work = work.replace(/(?:^|\s)#([A-Za-z0-9_-]+)/g, (_m, t) => {
+      if (!out.tags.includes(t)) out.tags.push(t);
+      return ' ';
+    });
+
+    // ~Project chip
+    const projM = work.match(/(?:^|\s)~([A-Za-z0-9_][A-Za-z0-9_\- ]*?)(?=\s[!#@]|$)/);
+    if (projM) {
+      out.projectHint = projM[1].trim();
+      const lc = out.projectHint.toLowerCase();
+      const exact = projects.find((p) => (p.name || '').toLowerCase() === lc);
+      if (exact) { out.projectId = exact.id; out.projectName = exact.name; }
+      work = work.replace(projM[0], ' ');
+    }
+
+    // @Assignee chip
+    const asnM = work.match(/(?:^|\s)@([A-Za-z0-9_.-]+)/);
+    if (asnM) {
+      out.assigneeHint = asnM[1];
+      const lc = asnM[1].toLowerCase();
+      const u = users.find((x) => (x.username || '').toLowerCase() === lc || (x.displayName || '').toLowerCase() === lc);
+      if (u) out.assigneeDisplay = u.displayName || u.username;
+      work = work.replace(asnM[0], ' ');
+    }
+
+    // Recurrence
+    const rrules = [
+      [/\bevery\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i, (m) => `every ${m[1].toLowerCase()}`],
+      [/\bevery\s+day\b|\bdaily\b/i, () => 'daily'],
+      [/\bevery\s+week\b|\bweekly\b/i, () => 'weekly'],
+      [/\bevery\s+month\b|\bmonthly\b/i, () => 'monthly'],
+      [/\bevery\s+year\b|\byearly\b|\bannually\b/i, () => 'yearly'],
+    ];
+    for (const [re, lbl] of rrules) {
+      const m = work.match(re);
+      if (m) { out.repeat = lbl(m); work = work.replace(m[0], ' '); break; }
+    }
+
+    // Date phrase
+    const now = new Date();
+    let date = null;
+    const dayMap = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+    const datePatterns = [
+      { re: /\btomorrow\b|\btmrw\b/i, resolve: () => new Date(now.getTime() + 86400000) },
+      { re: /\btoday\b|\btonight\b|\bnow\b/i, resolve: () => new Date(now) },
+      { re: /\bnext\s+week\b/i, resolve: () => new Date(now.getTime() + 7 * 86400000) },
+      { re: /\b(?:next|this)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i, resolve: (m) => {
+        const t = dayMap[m[1].toLowerCase()];
+        let delta = (t - now.getDay() + 7) % 7;
+        if (/^next/i.test(m[0]) && delta === 0) delta = 7;
+        return new Date(now.getTime() + delta * 86400000);
+      }},
+      { re: /\bin\s+(\d+)\s+(day|week|wk)s?\b/i, resolve: (m) => {
+        const n = parseInt(m[1], 10);
+        const mult = /week|wk/i.test(m[2]) ? 7 : 1;
+        return new Date(now.getTime() + n * mult * 86400000);
+      }},
+      { re: /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i, resolve: (m) => {
+        const t = dayMap[m[1].toLowerCase()];
+        const delta = ((t - now.getDay()) + 7) % 7 || 7;
+        return new Date(now.getTime() + delta * 86400000);
+      }},
+      { re: /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/, resolve: (m) => {
+        const mm = parseInt(m[1], 10), dd = parseInt(m[2], 10);
+        let yy = m[3] ? parseInt(m[3], 10) : now.getFullYear();
+        if (yy < 100) yy += 2000;
+        const d = new Date(yy, mm - 1, dd);
+        if (!m[3] && d < now) d.setFullYear(yy + 1);
+        return d;
+      }},
+    ];
+    for (const { re, resolve } of datePatterns) {
+      const m = work.match(re);
+      if (!m) continue;
+      try {
+        date = resolve(m);
+        work = work.replace(m[0], ' ');
+      } catch {}
+      break;
+    }
+
+    // Time phrase
+    let timeSet = false;
+    const timeM = work.match(/\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b|\b(?:at\s+)?(\d{1,2}):(\d{2})\b/i);
+    if (timeM) {
+      let h, mm;
+      if (timeM[3]) {
+        h = parseInt(timeM[1], 10);
+        mm = parseInt(timeM[2] || '0', 10);
+        const ap = timeM[3].toLowerCase();
+        if (ap === 'pm' && h < 12) h += 12;
+        if (ap === 'am' && h === 12) h = 0;
+      } else {
+        h = parseInt(timeM[4], 10);
+        mm = parseInt(timeM[5], 10);
+      }
+      if (h >= 0 && h < 24 && mm >= 0 && mm < 60) {
+        if (!date) date = new Date(now);
+        date.setHours(h, mm, 0, 0);
+        timeSet = true;
+        work = work.replace(timeM[0], ' ');
+      }
+    }
+
+    // "in N min/hour" supersedes date+time
+    const relM = work.match(/\bin\s+(\d+)\s+(minute|min|hour|hr)s?\b/i);
+    if (relM) {
+      const n = parseInt(relM[1], 10);
+      const unit = relM[2].toLowerCase();
+      const ms = unit.startsWith('min') ? n * 60000 : n * 3600000;
+      date = new Date(now.getTime() + ms);
+      timeSet = true;
+      work = work.replace(relM[0], ' ');
+    }
+
+    if (date) {
+      out.due = this._fmtDuePreview(date, timeSet);
+    }
+
+    // "to <known-project>" trailing heuristic
+    if (!out.projectId && projects.length) {
+      const lcWork = work.toLowerCase();
+      const sorted = projects.slice().sort((a, b) => (b.name || '').length - (a.name || '').length);
+      for (const p of sorted) {
+        const name = (p.name || '').trim();
+        if (!name) continue;
+        const needle = ' to ' + name.toLowerCase();
+        if (lcWork.endsWith(needle)) {
+          out.projectId = p.id;
+          out.projectName = p.name;
+          out.projectHint = p.name;
+          work = work.slice(0, work.length - needle.length).trimEnd();
+          break;
+        }
+      }
+    }
+
+    // Trailing known-name assignee
+    if (!out.assigneeDisplay && users.length) {
+      const tokens = work.split(/\s+/).filter(Boolean);
+      for (const take of [2, 1]) {
+        if (tokens.length < take + 1) continue;
+        const tail = tokens.slice(-take).join(' ').toLowerCase();
+        const u = users.find((x) => (x.username || '').toLowerCase() === tail || (x.displayName || '').toLowerCase() === tail);
+        if (u) {
+          out.assigneeDisplay = u.displayName || u.username;
+          out.assigneeHint = u.displayName || u.username;
+          work = tokens.slice(0, tokens.length - take).join(' ');
+          break;
+        }
+      }
+    }
+
+    out.title = work.replace(/\s+/g, ' ').trim();
+    return out;
+  }
+
+  _fmtDuePreview(d, hasTime) {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const target = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const diff = Math.round((target - today) / 86400000);
+    let label;
+    if (diff === 0) label = 'Today';
+    else if (diff === 1) label = 'Tomorrow';
+    else if (diff > 1 && diff < 7) label = d.toLocaleDateString(undefined, { weekday: 'short' });
+    else if (diff === -1) label = 'Yesterday';
+    else label = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    if (hasTime) {
+      label += ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).toLowerCase().replace(/\s/g, '');
+    }
+    return label;
   }
 
   _pillsHtml(counts) {
@@ -251,7 +541,80 @@ class PlatformTaskCountdownListCard extends HTMLElement {
     return null;
   }
 
+  _onInput(e) {
+    const input = e.target.closest('.add-input');
+    if (!input) return;
+    this._addValue = input.value;
+    this._addCursor = input.selectionStart || 0;
+    this._addHadFocus = true;
+    if (this._addError) this._addError = '';
+    // Throttle preview re-render so fast typing doesn't thrash.
+    clearTimeout(this._previewT);
+    this._previewT = setTimeout(() => this._renderPreviewOnly(), 80);
+  }
+
+  _renderPreviewOnly() {
+    const host = this.shadowRoot.querySelector('.add-bar');
+    if (!host) return;
+    const value = this._addValue || '';
+    const preview = value.trim() ? this._previewParse(value) : null;
+    let chips = host.querySelector('.add-preview');
+    const html = preview ? this._previewChipsHtml(preview) : '';
+    if (chips) chips.outerHTML = html || '';
+    else if (html) {
+      const errorEl = host.querySelector('.add-error');
+      const tpl = document.createElement('template');
+      tpl.innerHTML = html.trim();
+      if (errorEl) errorEl.before(tpl.content);
+      else host.appendChild(tpl.content);
+    }
+  }
+
+  _onKeydown(e) {
+    const input = e.target.closest('.add-input');
+    if (!input) return;
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      this._submitAdd();
+    } else if (e.key === 'Escape') {
+      this._addValue = '';
+      this._addError = '';
+      this._addHadFocus = false;
+      this._render();
+    }
+  }
+
+  async _submitAdd() {
+    const text = (this._addValue || '').trim();
+    if (!text || this._addBusy) return;
+    this._addBusy = true;
+    this._addError = '';
+    this._render();
+    try {
+      await this._hass.callService(
+        'platform_tasks',
+        'smart_add',
+        this._config.default_project_id
+          ? { text, default_project_id: this._config.default_project_id }
+          : { text },
+      );
+      this._addValue = '';
+      this._addHadFocus = true;
+      this._addCursor = 0;
+    } catch (err) {
+      this._addError = (err && (err.message || err.error || String(err))) || 'Add failed.';
+    } finally {
+      this._addBusy = false;
+      this._render();
+    }
+  }
+
   async _onClick(e) {
+    const addBtn = e.target.closest('[data-add-submit]');
+    if (addBtn) {
+      this._submitAdd();
+      return;
+    }
     const pill = e.target.closest('.pill');
     if (pill) {
       const next = pill.dataset.filter;
@@ -347,6 +710,96 @@ class PlatformTaskCountdownListCard extends HTMLElement {
       .badge.overdue { background: rgba(220,38,38,0.14); color: #dc2626; }
       .badge.today   { background: rgba(180,83,9,0.16); color: #b45309; }
       .count { font-variant-numeric: tabular-nums; opacity: 0.55; font-weight: 600; }
+
+      .add-bar {
+        padding: 4px 14px 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .add-bar.busy { opacity: 0.7; }
+      .add-row {
+        display: flex;
+        gap: 6px;
+        align-items: stretch;
+      }
+      .add-input {
+        flex: 1 1 auto;
+        min-width: 0;
+        font: inherit;
+        font-size: 13.5px;
+        padding: 9px 12px;
+        border-radius: 12px;
+        border: 1px solid var(--divider-color, rgba(0,0,0,0.10));
+        background: var(--card-background-color, rgba(0,0,0,0.02));
+        color: var(--primary-text-color);
+        outline: none;
+        transition: border-color 120ms ease, box-shadow 120ms ease;
+      }
+      .add-input:focus {
+        border-color: #059669;
+        box-shadow: 0 0 0 3px rgba(5,150,105,0.18);
+      }
+      .add-input::placeholder { color: var(--secondary-text-color); opacity: 0.7; }
+      .add-btn {
+        background: #059669;
+        color: #fff;
+        border: none;
+        border-radius: 12px;
+        padding: 0 14px;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        cursor: pointer;
+        transition: background 120ms ease, transform 120ms ease;
+      }
+      .add-btn:hover:not([disabled]) { background: #047857; }
+      .add-btn:active:not([disabled]) { transform: scale(0.97); }
+      .add-btn[disabled] { opacity: 0.6; cursor: progress; }
+      .add-preview {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+        font-size: 11.5px;
+        color: var(--secondary-text-color);
+        padding: 0 4px;
+      }
+      .add-preview-title {
+        font-weight: 600;
+        color: var(--primary-text-color);
+        max-width: 240px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .add-preview-chips { display: contents; }
+      .pchip {
+        padding: 1px 7px;
+        border-radius: 999px;
+        background: rgba(5,150,105,0.10);
+        color: #059669;
+        font-weight: 600;
+        font-size: 10.5px;
+        letter-spacing: 0.01em;
+      }
+      .pchip.unresolved {
+        background: rgba(220,38,38,0.10);
+        color: #dc2626;
+      }
+      .pchip-user { background: rgba(99,102,241,0.10); color: #6366f1; }
+      .pchip-date { background: rgba(245,158,11,0.14); color: #b45309; }
+      .pchip-rep  { background: rgba(14,165,233,0.12); color: #0369a1; }
+      .pchip-pri  { background: rgba(220,38,38,0.10); color: #dc2626; }
+      .pchip-tag  { background: rgba(0,0,0,0.06); color: var(--secondary-text-color); }
+      .pchip-user.unresolved, .pchip-project.unresolved { background: rgba(220,38,38,0.10); color: #dc2626; }
+      .add-error {
+        font-size: 11.5px;
+        color: #dc2626;
+        padding: 0 4px;
+        font-weight: 600;
+      }
 
       .pills {
         display: flex;
