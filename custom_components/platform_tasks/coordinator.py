@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_BASE_URL,
@@ -142,8 +143,7 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
         from homeassistant.util import slugify
 
         project_meta = {p["id"]: p for p in projects}
-        now = datetime.now(timezone.utc)
-        today = now.date()
+        today = dt_util.now().date()
         out: list[dict[str, Any]] = []
 
         # Include every open task with a due date, regardless of how far
@@ -195,7 +195,7 @@ class PlatformTasksCoordinator(DataUpdateCoordinator[CoordinatorData]):
             body["dueDate"] = due.isoformat()
             body["isAllDay"] = False
         elif isinstance(due, date):
-            body["dueDate"] = datetime(due.year, due.month, due.day, tzinfo=timezone.utc).isoformat()
+            body["dueDate"] = dt_util.start_of_local_day(due).isoformat()
             body["isAllDay"] = True
         return await self._post(PATH_TASKS, body)
 

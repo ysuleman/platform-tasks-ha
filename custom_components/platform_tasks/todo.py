@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import slugify
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import PlatformTasksCoordinator
@@ -162,7 +163,7 @@ class PlatformTaskList(CoordinatorEntity[PlatformTasksCoordinator], TodoListEnti
                 body["dueDate"] = d.isoformat()
                 body["isAllDay"] = False
             else:
-                body["dueDate"] = datetime(item.due.year, item.due.month, item.due.day, tzinfo=timezone.utc).isoformat()
+                body["dueDate"] = dt_util.start_of_local_day(item.due).isoformat()
                 body["isAllDay"] = True
         if not body:
             return
